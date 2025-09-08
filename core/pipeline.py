@@ -434,7 +434,7 @@ def batch_translate_images(
             target_dir = output_dir / rel_path
             target_dir.mkdir(parents=True, exist_ok=True)
 
-            output_path = target_dir / f"{img_path.stem}_translated{output_ext}"
+            output_path = target_dir / f"{img_path.stem}{output_ext}"
             log_message(f"Image {i + 1}/{total_images}: Processing {img_path}", always_print=True)
 
             translate_and_render(img_path, config, output_path)
