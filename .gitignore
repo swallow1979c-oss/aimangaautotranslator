@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+/venv/
+/.venv/
+*.otf
+*.ttf
+*.pt
+*.onnx
+/output/
+.DS_Store
+Thumbs.db
+/.vscode/
+*.log
