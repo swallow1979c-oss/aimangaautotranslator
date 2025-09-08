@@ -351,6 +351,9 @@ def translate_and_render(
     log_message(f"Page {image_path} failed after {MAX_PAGE_RETRIES} retries.", always_print=True)
     return pil_original
 
+def natural_sort_key(path: Path):
+    return [int(text) if text.isdigit() else text.lower()
+            for text in re.split(r'(\d+)', path.name)]
 
 def batch_translate_images(
     input_dir: Union[str, Path],
@@ -389,7 +392,10 @@ def batch_translate_images(
 
     image_extensions = [".jpg", ".jpeg", ".png", ".webp"]
     # рекурсивный поиск файлов
-    image_files = [f for f in input_dir.rglob("*") if f.is_file() and f.suffix.lower() in image_extensions]
+    image_files = sorted(
+    [f for f in input_dir.rglob("*") if f.is_file() and f.suffix.lower() in image_extensions],
+    key=natural_sort_key
+    )
 
     if not image_files:
         log_message(f"No image files found in '{input_dir}'", always_print=True)
@@ -479,8 +485,8 @@ def main():
         "--output", type=str, required=False, help="Path to save the translated image or directory (if using --batch)"
     )
     parser.add_argument("--batch", action="store_true", help="Process all images in the input directory")
-    parser.add_argument("--detector-model", type=str, default="/content/aimangaautotranslate/models/comic-speech-bubble-detector.pt", help="YOLO model for detecting speech bubbles")
-    parser.add_argument("--cleaner-model", type=str, default="/content/aimangaautotranslate/models/yolov8m_seg-speech-bubble.pt", help="YOLO model for cleaning bubbles (removing text)")
+    parser.add_argument("--detector-model", type=str, default="/content/aimangaautotranslator/models/comic-speech-bubble-detector.pt", help="YOLO model for detecting speech bubbles")
+    parser.add_argument("--cleaner-model", type=str, default="/content/aimangaautotranslator/models/yolov8m_seg-speech-bubble.pt", help="YOLO model for cleaning bubbles (removing text)")
     # --- Provider and API Key Arguments ---
     parser.add_argument(
         "--provider",
@@ -540,8 +546,7 @@ def main():
         "--reading-direction",
         type=str,
         default="rtl",
-        choices=["rtl", "ltr"],
-        help="Reading direction for sorting bubbles (rtl or ltr)",
+        help="Reading direction for sorting bubbles (rtl or ltr)"
     )
     # Cleaning args
     parser.add_argument("--dilation-kernel-size", type=int, default=7, help="ROI Dilation Kernel Size")
@@ -567,9 +572,8 @@ def main():
     parser.add_argument(
         "--translation-mode",
         type=str,
-        default="one-step",
-        choices=["one-step", "two-step"],
-        help="Translation process mode (one-step or two-step)",
+        default="two-step",
+        help="Translation process mode (one-step or two-step)"
     )
     parser.add_argument(
         "--reasoning-effort",
@@ -589,7 +593,7 @@ def main():
     parser.add_argument("--jpeg-quality", type=int, default=95, help="JPEG compression quality (1-100)")
     parser.add_argument("--png-compression", type=int, default=6, help="PNG compression level (0-9)")
     parser.add_argument(
-        "--image-mode", type=str, default="RGBA", choices=["RGB", "RGBA"], help="Processing image mode (RGB or RGBA)"
+        "--image-mode", type=str, default="RGB", choices=["RGB", "RGBA"], help="Processing image mode (RGB or RGBA)"
     )
     # General args
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
