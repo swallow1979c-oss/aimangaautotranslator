@@ -1,6 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
-
+import os
 import cv2
 import torch
 from ultralytics import YOLO
@@ -96,14 +96,12 @@ def _merge_overlapping_boxes(boxes, overlap_thresh=0.4):
 
     return merged
 
-
-
 def detect_speech_bubbles(
     image_path: Path,
     detector_model_path,
     confidence: float = 0.35,
     iou: float = 0.2,
-    shrink_ratio: float = 0.14,
+    shrink_ratio: float = float(os.environ.get("SHRINK_RATIO", "0.14")),
     merge_overlap: float = 0.01,
     verbose: bool = False,
     device=None
