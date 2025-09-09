@@ -334,6 +334,7 @@ def _parse_llm_response(
                 always_print=True,
             )
             lines = [line.strip() for line in response_text.split("\n") if line.strip()]
+            lines = [re.sub(r'^\d+\s*[:\-\)]\s*', '', line) for line in lines]
             # Remove potential leading/trailing markdown code blocks
             if lines and lines[0].startswith("```"):
                 lines.pop(0)
