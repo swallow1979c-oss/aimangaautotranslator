@@ -379,6 +379,45 @@ def _skia_surface_to_pil(surface: skia.Surface) -> Optional[Image.Image]:
         log_message(f"Error converting Skia Surface to PIL: {e}", always_print=True)
         return None
 
+def _split_token_to_fit(token: str, hb_font: hb.Font, features: Dict[str, bool], max_w: float) -> List[str]:
+    """
+    Делит один "кирпич" на части, чтобы каждая часть влезала в max_w при текущем шрифте.
+    Сначала пытаемся делить по естественным разделителям, затем посимвольно.
+    Возвращает список кусочков (порядок сохранён).
+    """
+    # 1) если и так влезает — возвращаем как есть
+    _, p = _shape_line(token, hb_font, features)
+    if _calculate_line_width(p, 1.0) <= max_w:
+        return [token]
+
+    # 2) пробуем мягкие разбиения по разделителям
+    for sep in ["-", "–", "—", "/", "\\", "·", "•", ":", ".", "|", "_"]:
+        if sep in token:
+            parts = []
+            for chunk in token.split(sep):
+                if not chunk:
+                    continue
+                # рекурсивно проверим каждый чанк (вдруг всё ещё длинный)
+                sub = _split_token_to_fit(chunk, hb_font, features, max_w)
+                parts.extend(sub + [sep])  # возвращаем разделитель как отдельный токен
+            if parts and parts[-1] in ["-", "–", "—", "/", "\\", "·", "•", ":", ".", "|", "_"]:
+                parts.pop()  # убрать хвостовой разделитель
+            if parts:
+                return parts
+
+    # 3) посимвольное разбиение 
+    pieces, cur = [], ""
+    for ch in token:
+        test = cur + ch
+        _, p = _shape_line(test, hb_font, features)
+        if _calculate_line_width(p, 1.0) <= max_w or not cur:
+            cur = test
+        else:
+            pieces.append(cur)
+            cur = ch
+    if cur:
+        pieces.append(cur)
+    return pieces
 
 # --- Helper for LIR Padding ---
 def _calculate_lir_padding_for_flat_edges(
@@ -608,6 +647,23 @@ def render_text_skia(
         max_render_width = final_render_x2 - final_render_x1
         max_render_height = final_render_y2 - final_render_y1
 
+        # --- Guard: если LIR слишком мелкий по сравнению с исходным bbox, откатываемся к padded bbox ---
+        min_dim_ratio = 0.35  # 35% от размеров исходного bbox
+        if (max_render_width < bubble_width * min_dim_ratio) or (max_render_height < bubble_height * min_dim_ratio):
+            padding_ratio = 0.08
+            max_render_width = bubble_width * (1 - 2 * padding_ratio)
+            max_render_height = bubble_height * (1 - 2 * padding_ratio)
+            max_render_width = max(1.0, float(max_render_width))
+            max_render_height = max(1.0, float(max_render_height))
+            target_center_x = x1 + bubble_width / 2.0
+            target_center_y = y1 + bubble_height / 2.0
+            use_lir = False
+        else:
+            # как и было
+            target_center_x = final_render_x1 + max_render_width / 2.0
+            target_center_y = final_render_y1 + max_render_height / 2.0
+            use_lir = True
+
         if max_render_width <= 0 or max_render_height <= 0:
             log_message(
                 (
@@ -695,7 +751,7 @@ def render_text_skia(
     }
     log_message(f"HarfBuzz features to enable: {features_to_enable}", verbose=verbose)
 
-    # --- Font Size Iteration ---
+    # --- Font Size Iteration --- 
     best_fit_size = -1
     best_fit_lines_data = None
     best_fit_metrics = None
@@ -741,22 +797,37 @@ def render_text_skia(
         current_line_stripped_words = []
         longest_word_width_at_size = 0
 
-        for word in words:  # Iterate through stripped words for measurement
+        for word in words:
             _, w_positions = _shape_line(word, hb_font, features_to_enable)
             word_width = _calculate_line_width(w_positions, 1.0)
             longest_word_width_at_size = max(longest_word_width_at_size, word_width)
 
             if word_width > max_render_width:
-                original_word = word_map.get(word, word)
-                log_message(
-                    (
-                        f"Size {current_size}: Word '{original_word}' ({word_width:.1f}px) wider than max width "
-                        f"({max_render_width:.1f}px). Trying smaller size."
-                    ),
-                    verbose=verbose,
-                )
-                current_line_stripped_words = None
-                break
+                # Если мы ещё не на полу — уменьшаем размер как раньше 
+                if current_size > min_font_size:
+                    original_word = word_map.get(word, word)
+                    log_message(
+                        (f"Size {current_size}: Word '{original_word}' ({word_width:.1f}px) wider than max width "
+                         f"({max_render_width:.1f}px). Trying smaller size."),
+                        verbose=verbose,
+                    )
+                    current_line_stripped_words = None
+                    break
+                # Мы на полу размера — включаем аварийное разбиение токена
+                pieces = _split_token_to_fit(word, hb_font, features_to_enable, max_render_width)
+                for piece in pieces:
+                    test_line = current_line_stripped_words + [piece]
+                    _, test_positions = _shape_line(" ".join(test_line), hb_font, features_to_enable)
+                    tentative_width = _calculate_line_width(test_positions, 1.0)
+                    if tentative_width <= max_render_width:
+                        current_line_stripped_words = test_line
+                    else:
+                        # перенос строки
+                        if current_line_stripped_words:
+                            original_line_words = [word_map.get(w, w) for w in current_line_stripped_words]
+                            wrapped_lines_text.append(" ".join(original_line_words))
+                        current_line_stripped_words = [piece]
+                continue
 
             test_line_stripped_words = current_line_stripped_words + [word]
             test_line_stripped_text = " ".join(test_line_stripped_words)
@@ -995,7 +1066,7 @@ def render_text_skia(
                     )
                     continue
 
-                # --- Setup Skia Font for Segment ---
+                # --- Setup Skia Font for Segment --- 
                 skia_font_segment = skia.Font(typeface_to_use, final_font_size)
                 skia_font_segment.setSubpixel(use_subpixel_rendering)
                 skia_font_segment.setHinting(skia_hinting)
