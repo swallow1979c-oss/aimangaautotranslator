@@ -241,6 +241,7 @@ def translate_and_render(
                         "[Gemini-Translate: No text/empty response]",
                         "[OCR FAILED]",
                         "[Translation Error]",
+                        "[Gemini: OCR call failed/blocked]"
                     ]
                     values = list(translations_by_id.values()) if isinstance(translations_by_id, dict) else (translations_by_id or [])
                     if any(isinstance(v, str) and any(v.strip().startswith(es) for es in error_strings) for v in values):
