@@ -39,11 +39,12 @@ def _shrink_bbox(x1, y1, x2, y2, shrink_ratio=0.05):
 
 def _merge_overlapping_boxes(boxes, overlap_thresh=0.4):
     """
-    Merge overlapping bounding boxes to avoid duplicate or fragmented detections.
+    Merge only fully overlapping or nested bounding boxes.
+    Avoids merging separate but touching/close bubbles.
 
     Args:
         boxes (list[tuple[int,int,int,int]]): List of (x1,y1,x2,y2)
-        overlap_thresh (float): IoU threshold for merging
+        overlap_thresh (float): IoU threshold for merging (default 0.4)
 
     Returns:
         list[tuple[int,int,int,int]]
@@ -58,37 +59,52 @@ def _merge_overlapping_boxes(boxes, overlap_thresh=0.4):
         if used[i]:
             continue
         x1, y1, x2, y2 = boxes[i]
+
         for j in range(i + 1, len(boxes)):
             if used[j]:
                 continue
-            xx1 = max(x1, boxes[j][0])
-            yy1 = max(y1, boxes[j][1])
-            xx2 = min(x2, boxes[j][2])
-            yy2 = min(y2, boxes[j][3])
+
+            bx1, by1, bx2, by2 = boxes[j]
+
+            # считаем пересечение
+            xx1 = max(x1, bx1)
+            yy1 = max(y1, by1)
+            xx2 = min(x2, bx2)
+            yy2 = min(y2, by2)
 
             inter_area = max(0, xx2 - xx1) * max(0, yy2 - yy1)
             boxA_area = (x2 - x1) * (y2 - y1)
-            boxB_area = (boxes[j][2] - boxes[j][0]) * (boxes[j][3] - boxes[j][1])
-            overlap = inter_area / float(boxA_area + boxB_area - inter_area + 1e-6)
+            boxB_area = (bx2 - bx1) * (by2 - by1)
+            union_area = boxA_area + boxB_area - inter_area + 1e-6
+            overlap = inter_area / union_area
 
-            if overlap > overlap_thresh:
-                # объединяем в один бокс
-                x1 = min(x1, boxes[j][0])
-                y1 = min(y1, boxes[j][1])
-                x2 = max(x2, boxes[j][2])
-                y2 = max(y2, boxes[j][3])
+            # проверка на вложенность (один бокс почти полностью внутри другого)
+            is_nested = (
+                (bx1 >= x1 and by1 >= y1 and bx2 <= x2 and by2 <= y2) or
+                (x1 >= bx1 and y1 >= by1 and x2 <= bx2 and y2 <= by2)
+            )
+
+            if overlap > overlap_thresh or is_nested:
+                # объединяем только в случае сильного пересечения или вложенности
+                x1 = min(x1, bx1)
+                y1 = min(y1, by1)
+                x2 = max(x2, bx2)
+                y2 = max(y2, by2)
                 used[j] = True
+
         merged.append((x1, y1, x2, y2))
+
     return merged
+
 
 
 def detect_speech_bubbles(
     image_path: Path,
     detector_model_path,
     confidence: float = 0.35,
-    iou: float = 0.3,
+    iou: float = 0.2,
     shrink_ratio: float = 0.14,
-    merge_overlap: float = 0.05,
+    merge_overlap: float = 0.01,
     verbose: bool = False,
     device=None
 ):
