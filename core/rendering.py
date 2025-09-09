@@ -948,10 +948,8 @@ def render_text_skia(
     }
     skia_hinting = hinting_map.get(font_hinting.lower(), skia.FontHinting.kNone)
 
-    # --- Determine Text Color based on Bubble Background ---
+    # --- Determine Text Color ---
     text_color = skia.ColorBLACK
-    if bubble_color_bgr and (sum(bubble_color_bgr) / 3) < 128:
-        text_color = skia.ColorWHITE
 
     # --- Настройка обводки (Stroke) ---
     import os
