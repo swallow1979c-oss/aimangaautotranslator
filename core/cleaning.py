@@ -132,7 +132,7 @@ def clean_speech_bubbles(
     device=None,
     dilation_kernel_size=7,
     dilation_iterations=1,
-    use_otsu_threshold: bool = False,
+    use_otsu_threshold: bool = True,
     min_contour_area=50,
     closing_kernel_size=7,
     closing_iterations=1,
