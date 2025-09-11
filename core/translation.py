@@ -454,7 +454,7 @@ Return ONLY JSON, no explanations, no markdown."""
 
                 translation_prompt = f"""Analyze the provided full page context (already given above).
 Translate the following extracted bubble texts from {input_language} to {output_language}.
-DO NOT translate Japanese names with suffix "-san" into Mr./Ms. 
+DO NOT translate Japanese names with suffixes "-san" or "-sama" into Mr./Ms, except words like "大家さん" or "組長さん" etc.
 Choose wording that matches tone and context. Style rules:
 - Italic: *text* for thoughts/flashbacks/distant sounds/devices.
 - Bold: **text** for SFX, shouting, timestamps.
@@ -507,7 +507,7 @@ Do not include translations, explanations, or any other text in your response.""
 
                 translation_prompt = f"""Analyze the full manga/comic page image provided for context ({reading_order_desc} reading direction).
 Then, translate the following extracted speech bubble texts (numbered 1 to {num_bubbles}) from {input_language} to {output_language}.
-DO NOT translate Japanese names with suffix "-san" into Mr./Ms. 
+DO NOT translate Japanese names with suffixes "-san" or "-sama" into Mr./Ms, except words like "大家さん" or "組長さん" etc.
 Apply styling markers as needed (*italic*, **bold**, ***bold italic***).
 Respond exactly as:
 1: [...]
