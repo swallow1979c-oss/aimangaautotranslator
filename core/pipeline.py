@@ -271,18 +271,14 @@ def translate_and_render(
                             continue
 
                         bbox = bubble["bbox"]
-                        render_info = next((ri for ri in processed_bubbles_info if ri.get("bbox") == bbox), None)
-                        bubble_color_bgr = render_info["color"] if render_info else (255, 255, 255)
-                        lir_bbox = render_info.get("lir_bbox") if render_info else None
-                        cleaned_mask = render_info.get("mask") if render_info else None
 
                         rendered_image, success = render_text_skia(
                             pil_image=pil_cleaned_image,
                             text=text,
                             bbox=bbox,
-                            lir_bbox=lir_bbox,
-                            cleaned_mask=cleaned_mask,
-                            bubble_color_bgr=bubble_color_bgr,
+                            lir_bbox=None,
+                            cleaned_mask=None,
+                            bubble_color_bgr=(255,255,255),
                             font_dir=config.rendering.font_dir,
                             min_font_size=config.rendering.min_font_size,
                             max_font_size=config.rendering.max_font_size,
@@ -295,42 +291,6 @@ def translate_and_render(
                         if success:
                             pil_cleaned_image = rendered_image
                             final_image_to_save = pil_cleaned_image
-
-                    # --- Rendering --- translations_by
-                    for bubble in sorted_bubble_data:
-                        text = translations_by_id.get(bubble["id"], "").strip()
-
-                        if not text or text.startswith("[Translation Error]"):
-                            continue
-
-                        bubble["translation"] = text
-
-                        bbox = bubble["bbox"]
-                        render_info = next((ri for ri in processed_bubbles_info if ri.get("bbox") == bbox), None)
-                        bubble_color_bgr = render_info["color"] if render_info else (255, 255, 255)
-                        lir_bbox = render_info.get("lir_bbox") if render_info else None
-                        cleaned_mask = render_info.get("mask") if render_info else None
-
-                        rendered_image, success = render_text_skia(
-                            pil_image=pil_cleaned_image,
-                            text=text,
-                            bbox=bbox,
-                            lir_bbox=lir_bbox,
-                            cleaned_mask=cleaned_mask,
-                            bubble_color_bgr=bubble_color_bgr,
-                            font_dir=config.rendering.font_dir,
-                            min_font_size=config.rendering.min_font_size,
-                            max_font_size=config.rendering.max_font_size,
-                            line_spacing_mult=config.rendering.line_spacing,
-                            use_subpixel_rendering=config.rendering.use_subpixel_rendering,
-                            font_hinting=config.rendering.font_hinting,
-                            use_ligatures=config.rendering.use_ligatures,
-                            verbose=verbose,
-                        )
-                        if success:
-                            pil_cleaned_image = rendered_image
-                            final_image_to_save = pil_cleaned_image
-
 
         # --- Save Output ---
         if output_path:
