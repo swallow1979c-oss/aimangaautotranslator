@@ -1058,9 +1058,15 @@ def render_text_skia(
         verbose=verbose,
     )
 
-    # --- Render Line by Line, Segment by Segment ---
+    # --- Render whole block as a single TextBlob (stroke applied to the whole block) ---
     with surface as canvas:
+        # Один общий билдер для всего блока (всех строк и сегментов)
+        block_builder = skia.TextBlobBuilder()
         current_baseline_y = first_baseline_y
+
+        # Будем сохранять данные для логирования и подстраховки (на случай ошибки сборки)
+        per_segment_runs = []  # каждый элемент: (skia_font_segment, glyph_ids, skia_point_positions, segment_width, log_info)
+
         for i, line_data in enumerate(final_lines_data):
             line_text_with_markers = line_data["text_with_markers"]
             line_width_measured = line_data["width"]  # Width measured using regular font
@@ -1129,7 +1135,7 @@ def render_text_skia(
                     )
                     continue
 
-                # --- Setup Skia Font for Segment --- 
+                # --- Setup Skia Font for Segment ---
                 skia_font_segment = skia.Font(typeface_to_use, final_font_size)
                 skia_font_segment.setSubpixel(use_subpixel_rendering)
                 skia_font_segment.setHinting(skia_hinting)
@@ -1156,8 +1162,7 @@ def render_text_skia(
                     log_message(f"ERROR: HarfBuzz shaping failed for segment '{segment_text}': {e}", always_print=True)
                     continue
 
-                # --- Build and Draw Skia TextBlob for Segment ---
-                builder = skia.TextBlobBuilder()
+                # --- Build positions for this segment (absolute coordinates) ---
                 glyph_ids = [info.codepoint for info in infos]
                 skia_point_positions = []
                 segment_cursor_x = 0
@@ -1165,37 +1170,49 @@ def render_text_skia(
 
                 for _, pos in zip(infos, positions):
                     glyph_x = cursor_x + segment_cursor_x + (pos.x_offset / HB_26_6_SCALE_FACTOR)
-                    glyph_y = current_baseline_y - (pos.y_offset / HB_26_6_SCALE_FACTOR)  # Y flipped
+                    glyph_y = current_baseline_y - (pos.y_offset / HB_26_6_SCALE_FACTOR)
                     skia_point_positions.append(skia.Point(glyph_x, glyph_y))
                     segment_cursor_x += pos.x_advance / HB_26_6_SCALE_FACTOR
 
-                try:
-                    _ = builder.allocRunPos(skia_font_segment, glyph_ids, skia_point_positions)
-                    text_blob = builder.make()
-                    if text_blob:
-                        # Draw with stroke first, then fill
-                        canvas.drawTextBlob(text_blob, 0, 0, stroke_paint)
-                        canvas.drawTextBlob(text_blob, 0, 0, fill_paint)
-                        segment_width = segment_cursor_x
-                        cursor_x += segment_width
-                        log_message(
-                            (
-                                f"  Rendered segment '{segment_text}' ({style_name}), width={segment_width:.1f}, "
-                                f"new cursor_x={cursor_x:.1f}"
-                            ),
-                            verbose=verbose,
-                        )
-                    else:
-                        log_message(f"Warning: Failed to build TextBlob for segment '{segment_text}'", verbose=verbose)
+                # --- Не рисуем сразу, а добавляем run в общий буфер или сохраняем для резервного варианта ---
+                per_segment_runs.append((skia_font_segment, glyph_ids, skia_point_positions, segment_cursor_x, (segment_text, style_name)))
+                cursor_x += segment_cursor_x
 
-                except Exception as e:
-                    log_message(f"ERROR during Skia rendering for segment '{segment_text}': {e}", always_print=True)
-                    segment_width = segment_cursor_x
-                    cursor_x += segment_width
-
+            # Перейти к следующей базовой линии (строке)
             current_baseline_y += final_line_height
 
-    # --- Convert back to PIL ---
+        # --- Попробуем собрать единый TextBlob и отрисовать единожды ---
+        try:
+            # Добавляем в block_builder все runs
+            for sk_font, glyph_ids, positions, seg_width, seg_info in per_segment_runs:
+                # allocRunPos автоматически добавляет run в один буфер
+                _ = block_builder.allocRunPos(sk_font, glyph_ids, positions)
+
+            block_text_blob = block_builder.make()
+            if block_text_blob:
+                # Draw stroke once for весь блок, затем заливка
+                canvas.drawTextBlob(block_text_blob, 0, 0, stroke_paint)
+                canvas.drawTextBlob(block_text_blob, 0, 0, fill_paint)
+                log_message(f"Rendered entire block as single TextBlob with {len(per_segment_runs)} runs.", verbose=verbose)
+            else:
+                raise RuntimeError("block_builder.make() returned None")
+
+        except Exception as e:
+            # В случае ошибки сборки TextBlob — логируем и откатываемся к по-сегментной отрисовке
+            log_message(f"Warning: Failed to build/draw combined TextBlob ({e}). Falling back to per-segment rendering.", verbose=verbose, always_print=True)
+            # Рисуем сегмент за сегментом (как было раньше) — stroke+fill
+            for sk_font, glyph_ids, positions, seg_width, seg_info in per_segment_runs:
+                try:
+                    fallback_builder = skia.TextBlobBuilder()
+                    _ = fallback_builder.allocRunPos(sk_font, glyph_ids, positions)
+                    tb = fallback_builder.make()
+                    if tb:
+                        canvas.drawTextBlob(tb, 0, 0, stroke_paint)
+                        canvas.drawTextBlob(tb, 0, 0, fill_paint)
+                except Exception as e2:
+                    log_message(f"ERROR: Fallback per-segment draw failed for segment {seg_info}: {e2}", always_print=True)
+
+    # --- Convert back to PIL --- 
     final_pil_image = _skia_surface_to_pil(surface)
     if final_pil_image is None:
         log_message("Failed to convert final Skia surface back to PIL.", always_print=True)
