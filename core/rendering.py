@@ -419,6 +419,47 @@ def _split_token_to_fit(token: str, hb_font: hb.Font, features: Dict[str, bool],
         pieces.append(cur)
     return pieces
 
+VOWELS = set("aeiouаеёиоуыэюяAEIOUАЕЁИОУЫЭЮЯ")  # латиница + кириллица
+
+def _apply_hyphenation_rules(text: str, min_len: int = 12) -> str:
+    """
+    Обрабатывает блок текста по правилам:
+    - если слово >= min_len символов → перенос;
+    - если есть дефис и слово длинное → перенос после дефиса;
+    - иначе перенос после ближайшей к середине гласной.
+    """
+
+    def split_word(word: str) -> str:
+        # короткие не трогаем
+        if len(word) < min_len:
+            return word
+
+        # если есть дефис — переносим после него
+        if "-" in word:
+            parts = word.split("-", 1)
+            return parts[0] + "-\n" + parts[1]
+
+        # иначе ищем гласную, ближайшую к середине
+        mid = len(word) // 2
+        closest_idx = None
+        min_dist = len(word)
+        for i, ch in enumerate(word):
+            if ch in VOWELS:
+                dist = abs(i - mid)
+                if dist < min_dist:
+                    min_dist = dist
+                    closest_idx = i
+        if closest_idx is not None:
+            return word[: closest_idx + 1] + "-\n" + word[closest_idx + 1 :]
+        else:
+            # fallback: режем просто по середине
+            return word[:mid] + "-\n" + word[mid:]
+
+    # разбиваем по пробельным разделителям, сохраняя их
+    tokens = re.split(r"(\s+)", text)
+    processed = [split_word(tok) if tok.strip() else tok for tok in tokens]
+    return "".join(processed)
+
 # --- Helper for LIR Padding ---
 def _calculate_lir_padding_for_flat_edges(
     cleaned_mask: np.ndarray, lir_bbox: List[int], padding_percentage: float = 0.05, flatness_threshold: float = 0.80
@@ -533,6 +574,8 @@ def render_text_skia(
     clean_text = " ".join(text.split())
     if not clean_text:
         return pil_image, True
+
+    clean_text = _apply_hyphenation_rules(clean_text, min_len=12)
 
     # --- Determine Rendering Boundaries and Target Center ---
     use_lir = False
@@ -803,7 +846,6 @@ def render_text_skia(
             longest_word_width_at_size = max(longest_word_width_at_size, word_width)
 
             if word_width > max_render_width:
-                # Если мы ещё не на полу — уменьшаем размер как раньше 
                 if current_size > min_font_size:
                     original_word = word_map.get(word, word)
                     log_message(
@@ -813,34 +855,57 @@ def render_text_skia(
                     )
                     current_line_stripped_words = None
                     break
-                # Мы на полу размера — включаем аварийное разбиение токена
+
+                # emergency splitting into pieces
                 pieces = _split_token_to_fit(word, hb_font, features_to_enable, max_render_width)
                 for piece in pieces:
-                    test_line = current_line_stripped_words + [piece]
+                    test_line = (current_line_stripped_words or []) + [piece]
                     _, test_positions = _shape_line(" ".join(test_line), hb_font, features_to_enable)
                     tentative_width = _calculate_line_width(test_positions, 1.0)
                     if tentative_width <= max_render_width:
                         current_line_stripped_words = test_line
+                        # Если кусок кончается дефисом — это означает, что мы хотим
+                        # обязательный перенос после него: завершаем текущую строку.
+                        if piece.endswith("-"):
+                            original_line_words = [word_map.get(w, w) for w in current_line_stripped_words]
+                            wrapped_lines_text.append(" ".join(original_line_words))
+                            current_line_stripped_words = []
                     else:
-                        # перенос строки
                         if current_line_stripped_words:
                             original_line_words = [word_map.get(w, w) for w in current_line_stripped_words]
                             wrapped_lines_text.append(" ".join(original_line_words))
                         current_line_stripped_words = [piece]
+                        # если этот new piece сам оканчивается дефисом — сразу переносим
+                        if piece.endswith("-"):
+                            original_line_words = [word_map.get(w, w) for w in current_line_stripped_words]
+                            wrapped_lines_text.append(" ".join(original_line_words))
+                            current_line_stripped_words = []
                 continue
 
-            test_line_stripped_words = current_line_stripped_words + [word]
+            # обычный путь — слово влезает целиком
+            test_line_stripped_words = (current_line_stripped_words or []) + [word]
             test_line_stripped_text = " ".join(test_line_stripped_words)
             _, test_positions = _shape_line(test_line_stripped_text, hb_font, features_to_enable)
             tentative_width = _calculate_line_width(test_positions, 1.0)
 
             if tentative_width <= max_render_width:
                 current_line_stripped_words = test_line_stripped_words
+                # если слово оканчивается дефисом (наш вставленный перенос) —
+                # обязательно завершаем строку здесь
+                if word.endswith("-"):
+                    original_line_words = [word_map.get(w, w) for w in current_line_stripped_words]
+                    wrapped_lines_text.append(" ".join(original_line_words))
+                    current_line_stripped_words = []
             else:
                 if current_line_stripped_words:
                     original_line_words = [word_map.get(w, w) for w in current_line_stripped_words]
                     wrapped_lines_text.append(" ".join(original_line_words))
                 current_line_stripped_words = [word]
+                # и если он-закончился дефисом — переносим сразу
+                if word.endswith("-"):
+                    original_line_words = [word_map.get(w, w) for w in current_line_stripped_words]
+                    wrapped_lines_text.append(" ".join(original_line_words))
+                    current_line_stripped_words = []
 
         if current_line_stripped_words is None:
             current_size -= 1
