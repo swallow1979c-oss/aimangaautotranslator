@@ -124,19 +124,47 @@ class GeminiKeyManager:
         self.keys = keys
         self.exhausted = set()  # номера ключей, которые нельзя использовать
         self.current_index = 0
+        # Нужны для критической проверки:
+        self.fail_streak = 0        # сколько ключей подряд исчерпано именно по 503/unavailable после MAX_RETRIES
+        self.processed_any = False  # был ли хоть один успешный ответ (хотя бы одно изображение обработано)
 
     def get_next_key(self):
         total_keys = len(self.keys)
+        # Ищем первый не исчерпанный ключ
         for _ in range(total_keys):
             idx = self.current_index
             key = self.keys[idx]
             self.current_index = (self.current_index + 1) % total_keys
             if idx not in self.exhausted:
                 return idx, key
-        return None, None  # все ключи исчерпаны
 
-    def mark_exhausted(self, idx: int):
+        # Все ключи помечены как exhausted.
+        # Если подряд все ключи сгорели по 503/unavailable и при этом не было ни одного успешного вызова -> критическая ситуация
+        if self.fail_streak >= total_keys and not self.processed_any:
+            log_message("❌ Все Gemini ключи выдали 503/unavailable по максимуму, и ни одно изображение не обработано. Завершаем.", always_print=True)
+            os._exit(1)
+
+        # Иначе — перезапускаем очередь и пытаемся снова
+        log_message("Все Gemini ключи были использованы. Перезапускаю очередь...", always_print=True)
+        self.exhausted.clear()
+        self.current_index = 0
+        # после перезапуска обнуляем streak — начинаем новый цикл
+        self.fail_streak = 0
+        return self.get_next_key()
+
+    def mark_exhausted(self, idx: int, reason_503: bool = False):
+        """Пометить ключ как исчерпанный. Если reason_503=True — увеличиваем fail_streak."""
         self.exhausted.add(idx)
+        if reason_503:
+            self.fail_streak += 1
+        else:
+            # любая другая причина — сбрасываем streak
+            self.fail_streak = 0
+
+    def mark_success(self):
+        """Вызывать при успешном ответе (хотя бы одно изображение обработано)."""
+        self.processed_any = True
+        self.fail_streak = 0
 
 
 # Создаём один глобальный менеджер ключей для всей сессии/батча
@@ -183,15 +211,14 @@ def _call_llm_with_retry(
 
         last_error = None
 
-        last_error = None
-
         while True:
             # если нет активного ключа → взять новый
             if current_key_index is None:
                 idx, api_key = gemini_key_manager.get_next_key()
                 if api_key is None:
-                    log_message("❌ Все Gemini ключи исчерпаны/запрещены. Либо вводить новые, либо ждать.", always_print=True)
-                    os._exit(1)
+                    # Это означает, что в конфиге нет ключей вообще — это ошибка конфигурации
+                    log_message("❌ Нет Gemini API ключей в конфиге.", always_print=True)
+                    raise ValueError("No Gemini API keys configured.")
                 current_key_index = idx
                 log_message(f"Using Gemini key {idx + 1}/{len(config.gemini_api_keys)}", verbose=True)
             else:
@@ -201,13 +228,20 @@ def _call_llm_with_retry(
             # пробуем вызвать модель с этим ключом
             for attempt in range(1, MAX_RETRIES + 1):
                 try:
-                    return call_gemini_endpoint(
+                    response = call_gemini_endpoint(
                         api_key=api_key,
                         model_name=model_name,
                         parts=api_parts,
                         generation_config=generation_config,
                         debug=debug,
                     )
+                    # Успех — отмечаем и возвращаем
+                    try:
+                        gemini_key_manager.mark_success()
+                    except Exception:
+                        # на всякий случай: не ломаем поведение, если manager по каким-то причинам не доступен
+                        pass
+                    return response
                 except Exception as e:
                     msg = str(e).lower()
                     last_error = e
@@ -230,29 +264,32 @@ def _call_llm_with_retry(
                             f"Gemini key {idx + 1} exhausted/forbidden. Switching to next key...",
                             verbose=True,
                         )
-                        gemini_key_manager.mark_exhausted(idx)
+                        # помечаем как исчерпанный, но это не 503-стрик
+                        gemini_key_manager.mark_exhausted(idx, reason_503=False)
                         current_key_index = None  # сбросить текущий ключ → взять новый
                         break  # выйти из retry цикла → переключиться на новый ключ
                     else:
                         raise
 
             else:
-                # все 5 попыток закончились
-                if "500" in str(last_error).lower() or "internal" in str(last_error).lower():
+                # все попытки для этого ключа закончились (for не был прерван)
+                last_msg = str(last_error).lower() if last_error else ""
+                if "500" in last_msg or "internal" in last_msg:
                     log_message(
                         f"Gemini key {idx + 1} failed with 500/internal after {MAX_RETRIES} attempts. Aborting...",
                         verbose=True,
                     )
                     raise last_error
-                else:
-                    # для 503 → помечаем ключ исчерпанным и пробуем следующий
-                    log_message(
-                        f"Gemini key {idx + 1} failed {MAX_RETRIES}/{MAX_RETRIES} attempts. Marking as exhausted...",
-                        verbose=True,
-                    )
-                    gemini_key_manager.mark_exhausted(idx)
-                    current_key_index = None
-                    continue
+
+                # Определяем: это 503-подобный провал (503/unavailable/overloaded) или иная причина?
+                reason_503 = any(x in last_msg for x in ("503", "unavailable", "overloaded"))
+                log_message(
+                    f"Gemini key {idx + 1} failed {MAX_RETRIES}/{MAX_RETRIES} attempts. Marking as exhausted (503-like={reason_503})...",
+                    verbose=True,
+                )
+                gemini_key_manager.mark_exhausted(idx, reason_503=reason_503)
+                current_key_index = None
+                continue
 
     elif provider == "OpenAI":
         api_key = config.openai_api_key
@@ -560,5 +597,3 @@ No extra text."""
         if bubble_ids:
             return {bid: f"[Translation Error: {e}]" for bid in bubble_ids}
         return [f"[Translation Error: {e}]"] * num_bubbles
-
-
