@@ -460,7 +460,7 @@ def _apply_hyphenation_rules(text: str, min_len: int = 12) -> str:
     processed = [split_word(tok) if tok.strip() else tok for tok in tokens]
     return "".join(processed)
 
-# --- Helper for LIR Padding ---
+# --- Helper for LIR Padding --- final_font_size
 def _calculate_lir_padding_for_flat_edges(
     cleaned_mask: np.ndarray, lir_bbox: List[int], padding_percentage: float = 0.05, flatness_threshold: float = 0.80
 ) -> Tuple[float, float, float, float]:
@@ -535,6 +535,7 @@ def render_text_skia(
     min_font_size: int = 8,
     max_font_size: int = 14,
     line_spacing_mult: float = 1.0,
+    scale_factor_env: float = float(os.environ.get("FONT_SCALE", "1.01")),
     use_subpixel_rendering: bool = False,
     font_hinting: str = "none",
     use_ligatures: bool = False,
@@ -562,7 +563,7 @@ def render_text_skia(
         - Modified PIL Image object (or original if failed).
         - Boolean indicating success.
     """
-    # --- Use original bbox for wrapping constraints ---
+    # --- Use original bbox for wrapping constraints --- 
     x1, y1, x2, y2 = bbox
     bubble_width = x2 - x1
     bubble_height = y2 - y1
@@ -959,13 +960,27 @@ def render_text_skia(
         return pil_image, False
 
     # --- Prepare for Rendering ---
-    final_font_size = best_fit_size
-    final_lines_data = best_fit_lines_data
-    final_metrics = best_fit_metrics
-    final_max_line_width = best_fit_max_line_width
+    final_font_size = int(best_fit_size * scale_factor_env)
+    final_lines_data = best_fit_lines_data  # сами строки не меняются
+
+    # Пересчитываем метрики под новый размер
+    skia_font_fix = skia.Font(regular_typeface, final_font_size)
+    final_metrics = skia_font_fix.getMetrics()
+
+    # Высота строки с учётом line_spacing_mult
     final_line_height = (-final_metrics.fAscent + final_metrics.fDescent + final_metrics.fLeading) * line_spacing_mult
     if final_line_height <= 0:
         final_line_height = final_font_size * 1.2 * line_spacing_mult
+
+    # Пересчёт максимальной ширины строки
+    new_max_line_width = 0
+    for line_data in final_lines_data:
+        line_text_stripped = STYLE_PATTERN.sub(r"\2", line_data["text_with_markers"])
+        infos, positions = _shape_line(line_text_stripped, hb.Font(regular_hb_face), features_to_enable)
+        width = _calculate_line_width(positions, 1.0) * (final_font_size / best_fit_size)
+        new_max_line_width = max(new_max_line_width, width)
+
+    final_max_line_width = new_max_line_width
 
     # --- Load Needed Font Resources for Rendering ---
     # Determine which styles are actually present in the text
