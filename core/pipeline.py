@@ -325,6 +325,7 @@ def batch_translate_images(
     """
     Process all images in a directory (recursively) using a configuration object.
     Files in each folder are processed fully before moving to the next folder.
+    Skips already processed files inside output folder.
     """
     input_dir = Path(input_dir)
     if not input_dir.is_dir():
@@ -343,11 +344,13 @@ def batch_translate_images(
     results = {"success_count": 0, "error_count": 0, "errors": {}}
     total_images = 0
 
-    # Сначала считаем общее количество изображений для прогресс-бара
+    # Сначала считаем общее количество изображений (без output)
     def count_images(folder: Path) -> int:
+        if folder.resolve() == output_dir.resolve():
+            return 0
         count = sum(1 for f in folder.iterdir() if f.is_file() and f.suffix.lower() in image_extensions)
         for sub in folder.iterdir():
-            if sub.is_dir():
+            if sub.is_dir() and sub.resolve() != output_dir.resolve():
                 count += count_images(sub)
         return count
 
@@ -366,6 +369,9 @@ def batch_translate_images(
     # Основная рекурсивная функция обработки
     def process_folder(folder: Path):
         nonlocal processed_count
+        if folder.resolve() == output_dir.resolve():
+            return
+
         # Сначала файлы текущей папки
         files = sorted(
             [f for f in folder.iterdir() if f.is_file() and f.suffix.lower() in image_extensions],
@@ -374,7 +380,7 @@ def batch_translate_images(
         for img_path in files:
             try:
                 if progress_callback:
-                    progress_callback(processed_count / total_images, 
+                    progress_callback(processed_count / total_images,
                                       f"Processing image {processed_count + 1}/{total_images}: {img_path.name}")
 
                 # Определяем расширение для сохранения
@@ -413,7 +419,8 @@ def batch_translate_images(
         # Потом рекурсивно подпапки
         subdirs = sorted([d for d in folder.iterdir() if d.is_dir()], key=natural_sort_key)
         for subdir in subdirs:
-            process_folder(subdir)
+            if subdir.resolve() != output_dir.resolve():
+                process_folder(subdir)
 
     process_folder(input_dir)
 
@@ -435,7 +442,6 @@ def batch_translate_images(
             log_message(f"  - {filename}: {error_msg}", always_print=True)
 
     return results
-
 
 def _load_gemini_keys_from_env() -> list[str]:
     raw = os.environ.get("GEMINI_API_KEYS", "")
