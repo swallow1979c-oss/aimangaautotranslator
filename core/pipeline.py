@@ -324,19 +324,7 @@ def batch_translate_images(
 ) -> Dict[str, Any]:
     """
     Process all images in a directory (recursively) using a configuration object.
-
-    Args:
-        input_dir (str or Path): Directory containing images to process (searched recursively)
-        config (MangaTranslatorConfig): Configuration object containing all settings.
-        output_dir (str or Path, optional): Directory to save translated images.
-                                            If None, uses ./output/<timestamp>.
-        progress_callback (callable, optional): Function to call with progress updates (0.0-1.0, message).
-
-    Returns:
-        dict: Processing results with keys:
-            - "success_count": Number of successfully processed images
-            - "error_count": Number of images that failed to process
-            - "errors": Dictionary mapping filenames to error messages
+    Files in each folder are processed fully before moving to the next folder.
     """
     input_dir = Path(input_dir)
     if not input_dir.is_dir():
@@ -352,68 +340,82 @@ def batch_translate_images(
     os.makedirs(output_dir, exist_ok=True)
 
     image_extensions = [".jpg", ".jpeg", ".png", ".webp"]
-    # рекурсивный поиск файлов
-    image_files = sorted(
-    [f for f in input_dir.rglob("*") if f.is_file() and f.suffix.lower() in image_extensions],
-    key=natural_sort_key
-    )
-
-    if not image_files:
-        log_message(f"No image files found in '{input_dir}'", always_print=True)
-        return {"success_count": 0, "error_count": 0, "errors": {}}
-
     results = {"success_count": 0, "error_count": 0, "errors": {}}
+    total_images = 0
 
-    total_images = len(image_files)
+    # Сначала считаем общее количество изображений для прогресс-бара
+    def count_images(folder: Path) -> int:
+        count = sum(1 for f in folder.iterdir() if f.is_file() and f.suffix.lower() in image_extensions)
+        for sub in folder.iterdir():
+            if sub.is_dir():
+                count += count_images(sub)
+        return count
+
+    total_images = count_images(input_dir)
+    if total_images == 0:
+        log_message(f"No image files found in '{input_dir}'", always_print=True)
+        return results
+
     start_batch_time = time.time()
-
     log_message(f"Starting batch processing of {total_images} images...", always_print=True)
-
     if progress_callback:
         progress_callback(0.0, f"Starting batch processing of {total_images} images...")
 
-    for i, img_path in enumerate(image_files):
-        try:
+    processed_count = 0
+
+    # Основная рекурсивная функция обработки
+    def process_folder(folder: Path):
+        nonlocal processed_count
+        # Сначала файлы текущей папки
+        files = sorted(
+            [f for f in folder.iterdir() if f.is_file() and f.suffix.lower() in image_extensions],
+            key=natural_sort_key
+        )
+        for img_path in files:
+            try:
+                if progress_callback:
+                    progress_callback(processed_count / total_images, 
+                                      f"Processing image {processed_count + 1}/{total_images}: {img_path.name}")
+
+                # Определяем расширение для сохранения
+                original_ext = img_path.suffix.lower()
+                desired_format = config.output.output_format
+                if desired_format == "jpeg":
+                    output_ext = ".jpg"
+                elif desired_format == "png":
+                    output_ext = ".png"
+                elif desired_format == "auto":
+                    output_ext = original_ext
+                else:
+                    output_ext = original_ext
+
+                # Сохраняем структуру папок
+                rel_path = img_path.relative_to(input_dir).parent
+                target_dir = output_dir / rel_path
+                target_dir.mkdir(parents=True, exist_ok=True)
+
+                output_path = target_dir / f"{img_path.stem}{output_ext}"
+                log_message(f"Processing {img_path}", always_print=True)
+
+                translate_and_render(img_path, config, output_path)
+                results["success_count"] += 1
+
+            except Exception as e:
+                log_message(f"Error processing {img_path}: {str(e)}", always_print=True)
+                results["error_count"] += 1
+                results["errors"][str(img_path)] = str(e)
+
+            processed_count += 1
             if progress_callback:
-                current_progress = i / total_images
-                progress_callback(current_progress, f"Processing image {i + 1}/{total_images}: {img_path.name}")
+                progress_callback(processed_count / total_images,
+                                  f"Completed {processed_count}/{total_images} images")
 
-            # Determine correct output extension
-            original_ext = img_path.suffix.lower()
-            desired_format = config.output.output_format
-            if desired_format == "jpeg":
-                output_ext = ".jpg"
-            elif desired_format == "png":
-                output_ext = ".png"
-            elif desired_format == "auto":
-                output_ext = original_ext
-            else:
-                output_ext = original_ext
+        # Потом рекурсивно подпапки
+        subdirs = sorted([d for d in folder.iterdir() if d.is_dir()], key=natural_sort_key)
+        for subdir in subdirs:
+            process_folder(subdir)
 
-            # Сохраняем структуру папок
-            rel_path = img_path.relative_to(input_dir).parent
-            target_dir = output_dir / rel_path
-            target_dir.mkdir(parents=True, exist_ok=True)
-
-            output_path = target_dir / f"{img_path.stem}{output_ext}"
-            log_message(f"Image {i + 1}/{total_images}: Processing {img_path}", always_print=True)
-
-            translate_and_render(img_path, config, output_path)
-
-            results["success_count"] += 1
-
-            if progress_callback:
-                completed_progress = (i + 1) / total_images
-                progress_callback(completed_progress, f"Completed {i + 1}/{total_images} images")
-
-        except Exception as e:
-            log_message(f"Error processing {img_path}: {str(e)}", always_print=True)
-            results["error_count"] += 1
-            results["errors"][str(img_path)] = str(e)
-
-            if progress_callback:
-                completed_progress = (i + 1) / total_images
-                progress_callback(completed_progress, f"Completed {i + 1}/{total_images} images (with errors)")
+    process_folder(input_dir)
 
     if progress_callback:
         progress_callback(1.0, "Processing complete")
