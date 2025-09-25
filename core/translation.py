@@ -214,19 +214,12 @@ def _call_llm_with_retry(
 
         is_gemini_25_series = model_name.startswith("gemini-2.5")
         max_output_tokens = 10240 if is_gemini_25_series else 2048
-        safety_settings = [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-        ]
 
         generation_config = {
             "temperature": temperature,
             "topP": top_p,
             "topK": top_k,
             "maxOutputTokens": max_output_tokens,
-            "safetySettings": safety_settings,
         }
 
         if "gemini-2.5-flash" in model_name and config.enable_thinking:
