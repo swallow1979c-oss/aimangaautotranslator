@@ -17,6 +17,24 @@ TRANSLATION_PATTERN = re.compile(
     r'^\s*(\d+)\s*:\s*"?\s*(.*?)\s*"?\s*(?=\s*\n\s*\d+\s*:|\s*$)', re.MULTILINE | re.DOTALL
 )
 
+def _contains_input_language(texts, input_language):
+    if isinstance(texts, dict):
+        candidate_texts = texts.values()
+    else:
+        candidate_texts = texts
+
+    combined = " ".join(candidate_texts)
+
+    if input_language.lower() in ("japanese", "ja", "jp"):
+        return bool(re.search(r'[\u3040-\u30ff\u4e00-\u9fff]', combined))
+    elif input_language.lower() in ("chinese", "zh", "cn"):
+        return bool(re.search(r'[\u4e00-\u9fff]', combined))
+    elif input_language.lower() in ("russian", "ru"):
+        return bool(re.search(r'[а-яА-ЯёЁ]', combined))
+    elif input_language.lower() in ("english", "en"):
+        return bool(re.search(r'[a-zA-Z]', combined))
+    return False
+
 def _strip_code_fences(s: str) -> str:
     s = s.strip()
     if s.startswith("```"):
@@ -439,6 +457,8 @@ def _parse_llm_response(
         # Treat parsing error as a failure for all bubbles
         return [f"[{provider}: Error parsing response]" for _ in range(expected_count)]
 
+MAX_TRANSLATION_RETRIES = 3
+
 def call_translation_api_batch(
     config: TranslationConfig,
     images_b64: List[str],
@@ -461,8 +481,6 @@ def call_translation_api_batch(
     )
 
     # --- Подготовка parts ---
-    # Если есть bubble_ids: между маркерами и картинками держим строгую структуру:
-    # [FULL_PAGE], then for each: [TEXT "BUBBLE_ID:<id>"], [IMAGE bubble]
     if bubble_ids:
         if len(bubble_ids) != num_bubbles:
             raise ValueError("bubble_ids length must match images_b64 length")
@@ -471,33 +489,36 @@ def call_translation_api_batch(
         for bid, img_b64 in zip(bubble_ids, images_b64):
             parts_with_ids.append({"text": f"[BUBBLE_ID:{bid}]"})
             parts_with_ids.append({"inline_data": {"mime_type": "image/jpeg", "data": img_b64}})
-
     else:
-        # старое поведение: один полный кадр + все кропы без id
         parts_with_ids = [{"inline_data": {"mime_type": "image/jpeg", "data": full_image_b64}}]
         for img_b64 in images_b64:
             parts_with_ids.append({"inline_data": {"mime_type": "image/jpeg", "data": img_b64}})
 
-    try:
-        if translation_mode == "two-step":
-            # ---------- STEP 1: OCR ----------
-            if bubble_ids:
-                ocr_prompt = f"""You will receive one full manga/comic page image for context, then for each bubble:
+    attempt = 0
+    result = None
+
+    while attempt < MAX_TRANSLATION_RETRIES:
+        attempt += 1
+        try:
+            if translation_mode == "two-step":
+                # ---------- STEP 1: OCR ----------
+                if bubble_ids:
+                    ocr_prompt = f"""You will receive one full manga/comic page image for context, then for each bubble:
 a text marker "[BUBBLE_ID:<id>]" immediately followed by the bubble image.
 For EACH bubble, extract ONLY the original {input_language} text.
 Return a STRICT JSON array. Each item: {{"id":"<id>","text":"<extracted>"}}.
 Return ONLY JSON, no explanations, no markdown."""
-                ocr_response_text = _call_llm_with_retry(config, parts_with_ids, ocr_prompt, debug)
-                ocr_map = _parse_json_id_map(ocr_response_text, bubble_ids, provider + "-OCR", debug)
-                if ocr_map is None:
-                    log_message("OCR JSON parse failed. Falling back to placeholders.", verbose=debug, always_print=True)
-                    return {bid: f"[{provider}: OCR call failed/blocked]" for bid in bubble_ids}
-                # ---------- STEP 2: TRANSLATE ----------
-                # Формируем компактный блок для перевода (только текст), но сохраняем ID
-                items_block = [{"id": bid, "text": ocr_map.get(bid, "")} for bid in bubble_ids]
-                items_json = json.dumps(items_block, ensure_ascii=False)
+                    ocr_response_text = _call_llm_with_retry(config, parts_with_ids, ocr_prompt, debug)
+                    ocr_map = _parse_json_id_map(ocr_response_text, bubble_ids, provider + "-OCR", debug)
+                    if ocr_map is None:
+                        log_message("OCR JSON parse failed. Falling back to placeholders.", verbose=debug, always_print=True)
+                        return {bid: f"[{provider}: OCR call failed/blocked]" for bid in bubble_ids}
 
-                translation_prompt = f"""Analyze the provided full page context (already given above).
+                    # ---------- STEP 2: TRANSLATE ----------
+                    items_block = [{"id": bid, "text": ocr_map.get(bid, "")} for bid in bubble_ids]
+                    items_json = json.dumps(items_block, ensure_ascii=False)
+
+                    translation_prompt = f"""Analyze the provided full page context (already given above).
 Translate the following extracted bubble texts from {input_language} to {output_language}.
 DO NOT translate Japanese names with suffixes "-san" or "-sama" into Mr./Ms, except words like "大家さん" or "組長さん" etc.
 Return a STRICT JSON array mirroring the input, each item: {{"id":"<id>","text":"<translation or [OCR FAILED]>"}}.
@@ -506,47 +527,41 @@ Return ONLY JSON.
 INPUT:
 {items_json}"""
 
-                # Для шага перевода достаточно дать только full image (контекст) + текстовый prompt
-                translation_parts = [{"inline_data": {"mime_type": "image/jpeg", "data": full_image_b64}}]
-                translation_response_text = _call_llm_with_retry(config, translation_parts, translation_prompt, debug)
-                tr_map = _parse_json_id_map(translation_response_text, bubble_ids, provider + "-Translate", debug)
-                if tr_map is None:
-                    log_message("Translate JSON parse failed. Returning OCR map as placeholders.", verbose=debug, always_print=True)
-                    # если не разобрали перевод, вернём OCR или пусто по ID
-                    return {bid: ocr_map.get(bid, "") for bid in bubble_ids}
-                return tr_map
+                    translation_parts = [{"inline_data": {"mime_type": "image/jpeg", "data": full_image_b64}}]
+                    translation_response_text = _call_llm_with_retry(config, translation_parts, translation_prompt, debug)
+                    tr_map = _parse_json_id_map(translation_response_text, bubble_ids, provider + "-Translate", debug)
+                    if tr_map is None:
+                        log_message("Translate JSON parse failed. Returning OCR map as placeholders.", verbose=debug, always_print=True)
+                        return {bid: ocr_map.get(bid, "") for bid in bubble_ids}
 
-            else:
-                # старое двухшаговое поведение БЕЗ id → вернём список
-                # --- Step 1: OCR (как было) ---
-                ocr_prompt = f"""Analyze the {num_bubbles} individual speech bubble images extracted from a manga/comic page in reading order ({reading_order_desc}).
+                    result = tr_map
+
+                else:
+                    # двухшаговое поведение БЕЗ id → список
+                    ocr_prompt = f"""Analyze the {num_bubbles} individual speech bubble images extracted from a manga/comic page in reading order ({reading_order_desc}).
 For each individual speech bubble image, only extract the original {input_language} text.
 Provide your response in this exact format, with each extraction on a new line:
 1: [Extracted text for bubble 1]
 ...
 {num_bubbles}: [Extracted text for bubble {num_bubbles}]
 Do not include translations, explanations, or any other text in your response."""
-                # parts только для кропов
-                ocr_parts = []
-                for img_b64 in images_b64:
-                    ocr_parts.append({"inline_data": {"mime_type": "image/jpeg", "data": img_b64}})
-                ocr_response_text = _call_llm_with_retry(config, ocr_parts, ocr_prompt, debug)
-                extracted_texts = _parse_llm_response(ocr_response_text, num_bubbles, provider + "-OCR", debug)
-                if extracted_texts is None:
-                    return [f"[{provider}: OCR call failed/blocked]"] * num_bubbles
+                    ocr_parts = [{"inline_data": {"mime_type": "image/jpeg", "data": img_b64}} for img_b64 in images_b64]
+                    ocr_response_text = _call_llm_with_retry(config, ocr_parts, ocr_prompt, debug)
+                    extracted_texts = _parse_llm_response(ocr_response_text, num_bubbles, provider + "-OCR", debug)
+                    if extracted_texts is None:
+                        return [f"[{provider}: OCR call failed/blocked]"] * num_bubbles
 
-                # --- Step 2: Translate (как было) ---
-                formatted = []
-                ocr_failed_indices = set()
-                for i, t in enumerate(extracted_texts):
-                    if f"[{provider}-OCR:" in t:
-                        formatted.append(f"{i + 1}: [OCR FAILED]")
-                        ocr_failed_indices.add(i)
-                    else:
-                        formatted.append(f"{i + 1}: {t}")
-                extracted_text_block = "\n".join(formatted)
+                    formatted = []
+                    ocr_failed_indices = set()
+                    for i, t in enumerate(extracted_texts):
+                        if f"[{provider}-OCR:" in t:
+                            formatted.append(f"{i + 1}: [OCR FAILED]")
+                            ocr_failed_indices.add(i)
+                        else:
+                            formatted.append(f"{i + 1}: {t}")
+                    extracted_text_block = "\n".join(formatted)
 
-                translation_prompt = f"""Analyze the full manga/comic page image provided for context ({reading_order_desc} reading direction).
+                    translation_prompt = f"""Analyze the full manga/comic page image provided for context ({reading_order_desc} reading direction).
 Then, translate the following extracted speech bubble texts (numbered 1 to {num_bubbles}) from {input_language} to {output_language}.
 DO NOT translate Japanese names with suffixes "-san" or "-sama" into Mr./Ms, except words like "大家さん" or "組長さん" etc.
 Respond exactly as:
@@ -555,16 +570,17 @@ Respond exactly as:
 ...
 {num_bubbles}: [...]
 For any entry "[OCR FAILED]" return exactly "[OCR FAILED]"."""
-                translation_parts = [{"inline_data": {"mime_type": "image/jpeg", "data": full_image_b64}}]
-                translation_response_text = _call_llm_with_retry(config, translation_parts + [{"text": translation_prompt}], "", debug)
-                final_translations = _parse_llm_response(translation_response_text, num_bubbles, provider + "-Translate", debug)
-                if final_translations is None:
-                    final_translations = [f"[{provider}: Translation call failed/blocked]"] * num_bubbles
-                return final_translations
+                    translation_parts = [{"inline_data": {"mime_type": "image/jpeg", "data": full_image_b64}}]
+                    translation_response_text = _call_llm_with_retry(config, translation_parts + [{"text": translation_prompt}], "", debug)
+                    final_translations = _parse_llm_response(translation_response_text, num_bubbles, provider + "-Translate", debug)
+                    if final_translations is None:
+                        final_translations = [f"[{provider}: Translation call failed/blocked]"] * num_bubbles
 
-        elif translation_mode == "one-step":
-            if bubble_ids:
-                one_step_prompt = f"""You will receive: one full page image for context, then for each bubble a text marker "[BUBBLE_ID:<id>]" immediately followed by that bubble's image.
+                    result = final_translations
+
+            elif translation_mode == "one-step":
+                if bubble_ids:
+                    one_step_prompt = f"""You will receive: one full page image for context, then for each bubble a text marker "[BUBBLE_ID:<id>]" immediately followed by that bubble's image.
 For EACH bubble:
 1) Extract the {input_language} text and translate it to {output_language} with natural tone matching the context.
 2) Apply styling if needed:
@@ -574,18 +590,16 @@ For EACH bubble:
 Return a STRICT JSON array. Each item: {{"id":"<id>","text":"<translation>"}}.
 Return ONLY JSON. No explanations, no markdown fences.
 Reading direction: {reading_order_desc}."""
-                response_text = _call_llm_with_retry(config, parts_with_ids, one_step_prompt, debug)
-                id_map = _parse_json_id_map(response_text, bubble_ids, provider, debug)
-                if id_map is None:
-                    log_message("One-step JSON parse failed. Falling back to numbered parsing (order-based).", verbose=debug, always_print=True)
-                    # как fallback: старый парсер + склейка по порядку
-                    translations = _parse_llm_response(response_text, num_bubbles, provider, debug) or []
-                    # упакуем в dict по текущему порядку IDs
-                    return {bid: (translations[i] if i < len(translations) else "") for i, bid in enumerate(bubble_ids)}
-                return id_map
-            else:
-                # Старое поведение (без id) → список
-                one_step_prompt = f"""Analyze the full page image, then the {num_bubbles} bubble images in reading order ({reading_order_desc}).
+                    response_text = _call_llm_with_retry(config, parts_with_ids, one_step_prompt, debug)
+                    id_map = _parse_json_id_map(response_text, bubble_ids, provider, debug)
+                    if id_map is None:
+                        log_message("One-step JSON parse failed. Falling back to numbered parsing (order-based).", verbose=debug, always_print=True)
+                        translations = _parse_llm_response(response_text, num_bubbles, provider, debug) or []
+                        result = {bid: (translations[i] if i < len(translations) else "") for i, bid in enumerate(bubble_ids)}
+                    else:
+                        result = id_map
+                else:
+                    one_step_prompt = f"""Analyze the full page image, then the {num_bubbles} bubble images in reading order ({reading_order_desc}).
 For each bubble: extract {input_language} and translate to {output_language}, applying *italic*, **bold**, ***bold italic*** if needed.
 Respond exactly as:
 1: [...]
@@ -593,15 +607,24 @@ Respond exactly as:
 ...
 {num_bubbles}: [...]
 No extra text."""
-                response_text = _call_llm_with_retry(config, parts_with_ids, one_step_prompt, debug)
-                translations = _parse_llm_response(response_text, num_bubbles, provider, debug)
-                if translations is None:
-                    translations = [f"[{provider}: API call failed/blocked]"] * num_bubbles
-                return translations
-        else:
-            raise ValueError(f"Unknown translation_mode specified in config: {translation_mode}")
-    except (ValueError, RuntimeError) as e:
-        log_message(f"Translation failed: {e}", always_print=True)
-        if bubble_ids:
-            return {bid: f"[Translation Error: {e}]" for bid in bubble_ids}
-        return [f"[Translation Error: {e}]"] * num_bubbles
+                    response_text = _call_llm_with_retry(config, parts_with_ids, one_step_prompt, debug)
+                    translations = _parse_llm_response(response_text, num_bubbles, provider, debug)
+                    if translations is None:
+                        translations = [f"[{provider}: API call failed/blocked]"] * num_bubbles
+                    result = translations
+            else:
+                raise ValueError(f"Unknown translation_mode specified in config: {translation_mode}")
+
+            # --- Проверка на исходный язык ---
+            if result and not _contains_input_language(result, input_language):
+                return result
+
+            log_message(f"⚠️ Detected untranslated text (attempt {attempt}/{MAX_TRANSLATION_RETRIES}), retrying...", always_print=True)
+
+        except (ValueError, RuntimeError) as e:
+            log_message(f"Translation attempt {attempt} failed: {e}", always_print=True)
+
+    log_message("❌ Translation failed after retries, returning last result", always_print=True)
+    return result if result is not None else (
+        {bid: "[Translation Error]" for bid in bubble_ids} if bubble_ids else ["[Translation Error]"] * num_bubbles
+    )
