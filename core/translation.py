@@ -12,7 +12,7 @@ from utils.endpoints import (
     call_openrouter_endpoint,
     call_openai_compatible_endpoint,
 )
-# Regex to find numbered lines in LLM responses 503 
+# Regex to find numbered lines in LLM responses 503 full_image
 TRANSLATION_PATTERN = re.compile(
     r'^\s*(\d+)\s*:\s*"?\s*(.*?)\s*"?\s*(?=\s*\n\s*\d+\s*:|\s*$)', re.MULTILINE | re.DOTALL
 )
@@ -38,7 +38,7 @@ def _contains_input_language(texts, input_language):
 def _strip_code_fences(s: str) -> str:
     s = s.strip()
     if s.startswith("```"):
-        # убираем первую строку ```... и конечную ```
+        # убираем первую строку ```... и конечную ``` 
         lines = s.splitlines()
         # убираем первую и последнюю строку, если там ```
         if lines and lines[0].startswith("```"):
@@ -48,33 +48,70 @@ def _strip_code_fences(s: str) -> str:
         return "\n".join(lines).strip()
     return s
 
-def _parse_json_id_map(response_text: Optional[str], expected_ids, provider: str, debug: bool = False) -> Optional[dict]:
-    """
-    Ожидаем JSON-массив объектов вида {"id": "<id>", "text": "<...>"}.
-    Возвращаем dict id->text. Если что-то не так — None.
-    """
-    if not response_text:
+def extract_first_json_array_lenient(text: str):
+    # 1. убираем code fences грубо
+    text = re.sub(r"^```[a-zA-Z]*\s*", "", text.strip())
+    text = re.sub(r"\s*```$", "", text.strip())
+
+    # 2. ищем первый '['
+    start = text.find('[')
+    if start == -1:
         return None
+
+    candidate = text[start:]
+
+    # 3. если нет закрывающей ], пытаемся ДОБАВИТЬ 
+    if candidate.count('[') > candidate.count(']'):
+        candidate = candidate.rstrip()
+        candidate += "\n]"
+
+    return candidate
+
+
+def _parse_json_id_map(response_text, expected_ids, provider, debug=False):
+    if not response_text or not response_text.strip():
+        return None
+
+    cleaned = _strip_code_fences(response_text).strip()
+
+    json_block = extract_first_json_array_lenient(cleaned)
+    if not json_block:
+        log_message(f"{provider}: No JSON array found", always_print=True)
+        return "__NO_JSON__"
+
+    data = json.loads(json_block)
+
     try:
-        cleaned = _strip_code_fences(response_text)
-        data = json.loads(cleaned)
-        if isinstance(data, dict) and "items" in data:
-            data = data["items"]
-        if not isinstance(data, list):
-            return None
-        out = {}
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            bid = item.get("id")
-            txt = item.get("text", "")
-            if isinstance(bid, str):
-                out[bid] = txt if isinstance(txt, str) else ""
-        # фильтруем только ожидаемые id
-        return {bid: out.get(bid, "") for bid in expected_ids}
+        data = json.loads(json_block)
     except Exception as e:
-        log_message(f"JSON parse failed: {e}", verbose=debug)
+        log_message(
+            f"{provider}: JSON parse failed:\n{json_block}\nERROR: {e}",
+            always_print=True
+        )
         return None
+
+    if isinstance(data, dict):
+        if "result" in data and isinstance(data["result"], list):
+            data = data["result"]
+        else:
+            log_message(f"{provider}: JSON object without array", always_print=True)
+            return None
+
+    result = {}
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        bid = item.get("id")
+        text = item.get("text", "")
+        if bid in expected_ids:
+            result[bid] = text
+
+    # гарантируем идемпотентность — все id должны быть
+    for bid in expected_ids:
+        result.setdefault(bid, "")
+
+    return result
+
 
 # Helper functions for sorting keys
 def _sort_key_ltr(d):
@@ -190,7 +227,7 @@ gemini_key_manager = None  # будет инициализирован пере�
 current_key_index = None   # активный ключ
 
 
-# --- Основная функция вызова LLM с retry ---
+# --- Основная функция вызова LLM с retry --- 
 def _call_llm_with_retry(
     config: TranslationConfig, parts: List[Dict[str, Any]], prompt_text: str, debug: bool = False
 ) -> Optional[str]:
@@ -255,6 +292,9 @@ def _call_llm_with_retry(
                         debug=debug,
                     )
                     # Успех — отмечаем и возвращаем
+                    if response is None or not str(response).strip():
+                        raise RuntimeError("Gemini returned empty response")
+
                     try:
                         gemini_key_manager.mark_success()
                     except Exception:
@@ -478,10 +518,11 @@ def call_translation_api_batch(
         if len(bubble_ids) != num_bubbles:
             raise ValueError("bubble_ids length must match images_b64 length")
 
-        parts_with_ids = [{"inline_data": {"mime_type": "image/jpeg", "data": full_image_b64}}]
+        ocr_parts = []
         for bid, img_b64 in zip(bubble_ids, images_b64):
-            parts_with_ids.append({"text": f"[BUBBLE_ID:{bid}]"})
-            parts_with_ids.append({"inline_data": {"mime_type": "image/jpeg", "data": img_b64}})
+            ocr_parts.append({"text": f"BUBBLE_ID={bid}"})
+            ocr_parts.append({"inline_data": {"mime_type": "image/jpeg", "data": img_b64}})
+
     else:
         parts_with_ids = [{"inline_data": {"mime_type": "image/jpeg", "data": full_image_b64}}]
         for img_b64 in images_b64:
@@ -496,41 +537,74 @@ def call_translation_api_batch(
             if translation_mode == "two-step":
                 # ---------- STEP 1: OCR ----------
                 if bubble_ids:
-                    ocr_prompt = f"""You will receive one full manga/comic page image for context, then for each bubble:
-a text marker "[BUBBLE_ID:<id>]" immediately followed by the bubble image.
-For EACH bubble, extract ONLY the original {input_language} text.
+                    ocr_prompt = f"""You will receive multiple bubble images.
+Each bubble image is immediately preceded by a line "BUBBLE_ID=<id>".
+For EACH bubble image, extract ONLY the original {input_language} text
+visible inside that bubble.
 Return a STRICT JSON array. Each item: {{"id":"<id>","text":"<extracted>"}}.
-Return ONLY JSON, no explanations, no markdown."""
-                    ocr_response_text = _call_llm_with_retry(config, parts_with_ids, ocr_prompt, debug)
-                    ocr_map = _parse_json_id_map(ocr_response_text, bubble_ids, provider + "-OCR", debug)
-                    if ocr_map is None:
-                        log_message("OCR JSON parse failed. Falling back to placeholders.", verbose=debug, always_print=True)
-                        return {bid: f"[{provider}: OCR call failed/blocked]" for bid in bubble_ids}
+Return ONLY valid JSON.
+Do not add explanations.
+Do not wrap in ```json.
+Do not include any text before or after the JSON.
+If no text is found, you MUST still return the object with the same id and empty text.
+Never omit an id."""
+                    ocr_retry = 0
+                    MAX_OCR_SEMANTIC_RETRIES = 2
+
+                    while ocr_retry <= MAX_OCR_SEMANTIC_RETRIES:
+                        ocr_response_text = _call_llm_with_retry(config, ocr_parts, ocr_prompt, debug)
+                        ocr_map = _parse_json_id_map(
+                            ocr_response_text, bubble_ids, provider + "-OCR", debug
+                        )
+
+                        if ocr_map == "__NO_JSON__":
+                            ocr_retry += 1
+                            log_message(
+                                f"OCR semantic retry {ocr_retry}/{MAX_OCR_SEMANTIC_RETRIES}",
+                                always_print=True
+                            )
+                            continue
+
+                        break
+
+                    if ocr_map in (None, "__NO_JSON__"):
+                        log_message("OCR returned no usable items", always_print=True)
+                        return {bid: "" for bid in bubble_ids}
+
+                    items_block = [
+                        {"id": bid, "text": ocr_map.get(bid, "")}
+                        for bid in bubble_ids
+                    ]
 
                     # ---------- STEP 2: TRANSLATE ----------
                     items_block = [{"id": bid, "text": ocr_map.get(bid, "")} for bid in bubble_ids]
                     items_json = json.dumps(items_block, ensure_ascii=False)
 
-                    translation_prompt = f"""Analyze the provided full page context (already given above).
-Translate the following extracted bubble texts from {input_language} to {output_language}.
+                    translation_prompt = f"""Translate the following extracted bubble texts from {input_language} to {output_language}.
 DO NOT translate Japanese names with suffixes "-san" or "-sama" into Mr./Ms, except words like "大家さん" or "組長さん" etc.
 Return a STRICT JSON array mirroring the input, each item: {{"id":"<id>","text":"<translation or [OCR FAILED]>"}}.
-Return ONLY JSON.
+Return ONLY a JSON array.
+The response MUST start with '[' and end with ']'.
+Do NOT include explanations, comments, or markdown.
+Any text outside the JSON array is a critical error.
 
 INPUT:
 {items_json}"""
 
-                    translation_parts = [{"inline_data": {"mime_type": "image/jpeg", "data": full_image_b64}}]
+                    translation_parts = [{"text": items_json}]
                     translation_response_text = _call_llm_with_retry(config, translation_parts, translation_prompt, debug)
                     tr_map = _parse_json_id_map(translation_response_text, bubble_ids, provider + "-Translate", debug)
                     if tr_map is None:
-                        log_message("Translate JSON parse failed. Returning OCR map as placeholders.", verbose=debug, always_print=True)
-                        return {bid: ocr_map.get(bid, "") for bid in bubble_ids}
+                        log_message("Translate JSON parse failed, using OCR text as fallback", always_print=True)
+                        return {
+                            bid: ocr_map.get(bid, "")
+                            for bid in bubble_ids
+                        }
 
                     result = tr_map
 
                 else:
-                    # двухшаговое поведение БЕЗ id → список
+                    # двухшаговое поведение БЕЗ id → список 
                     ocr_prompt = f"""Analyze the {num_bubbles} individual speech bubble images extracted from a manga/comic page in reading order ({reading_order_desc}).
 For each individual speech bubble image, only extract the original {input_language} text.
 Provide your response in this exact format, with each extraction on a new line:
@@ -608,8 +682,8 @@ No extra text."""
             else:
                 raise ValueError(f"Unknown translation_mode specified in config: {translation_mode}")
 
-            # --- Проверка на исходный язык ---
-            if result and not _contains_input_language(result, input_language):
+            # --- Проверка на исходный язык --- 
+            if result and _contains_input_language(result, output_language):
                 return result
 
             log_message(f"⚠️ Detected untranslated text (attempt {attempt}/{MAX_TRANSLATION_RETRIES}), retrying...", always_print=True)
