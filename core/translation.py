@@ -581,6 +581,12 @@ Never omit an id."""
                     items_json = json.dumps(items_block, ensure_ascii=False)
 
                     translation_prompt = f"""Translate the following extracted bubble texts from {input_language} to {output_language}.
+IMPORTANT:
+- Consider ALL lines together as one continuous dialogue.
+- Some lines may be fragments that continue in the next bubble (for example, ending with "...").
+- If a line logically continues the previous one, translate them consistently so that meaning, tone and sentence flow are preserved.
+- Do NOT merge lines: keep one output per input id, but make each translation sound natural in context of neighboring lines.
+
 DO NOT translate Japanese names with suffixes "-san" or "-sama" into Mr./Ms, except words like "大家さん" or "組長さん" etc.
 Return a STRICT JSON array mirroring the input, each item: {{"id":"<id>","text":"<translation or [OCR FAILED]>"}}.
 Return ONLY a JSON array.
