@@ -38,6 +38,7 @@ class TranslationConfig:
     model_name: str = "gemini-2.5-flash"
     provider_models: dict[str, Optional[str]] = field(default_factory=dict)
     temperature: float = 0.1
+    special_instructions: Optional[str] = None
     top_p: float = 0.95
     top_k: int = 64
     input_language: str = "Japanese"
