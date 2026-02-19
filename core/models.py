@@ -75,10 +75,10 @@ class RenderingConfig:
 @dataclass
 class OutputConfig:
     """Configuration for saving output images."""
-    jpeg_quality: int = 95
+    jpeg_quality: int = 80
     png_compression: int = 6
-    image_mode: str = "RGBA"
-    output_format: str = "auto"
+    image_mode: str = "RGB"
+    output_format: str = "jpeg"
 
 
 @dataclass
