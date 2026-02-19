@@ -536,6 +536,7 @@ def main():
     )
     # Translation args
     parser.add_argument("--temperature", type=float, default=0.1, help="Controls randomness in output (0.0-2.0)")
+    parser.add_argument("--special-instructions", type=str, default=None, help="Add special directions to prompt")
     parser.add_argument("--top-p", type=float, default=0.95, help="Nucleus sampling parameter (0.0-1.0)")
     parser.add_argument("--top-k", type=int, default=1, help="Limits to top k tokens")
     parser.add_argument(
@@ -558,7 +559,7 @@ def main():
     parser.add_argument("--max-font-size", type=int, default=14, help="Max font size for rendering text.")
     parser.add_argument("--min-font-size", type=int, default=8, help="Min font size for rendering text.")
     parser.add_argument("--line-spacing", type=float, default=1.0, help="Line spacing multiplier for rendered text.")
-    # Output args
+    # Output args 
     parser.add_argument("--jpeg-quality", type=int, default=95, help="JPEG compression quality (1-100)")
     parser.add_argument("--png-compression", type=int, default=6, help="PNG compression level (0-9)")
     parser.add_argument(
@@ -659,6 +660,7 @@ def main():
             ),
             model_name=model_name,
             temperature=args.temperature,
+            special_instructions=args.special_instructions,
             top_p=args.top_p,
             top_k=args.top_k,
             input_language=args.input_language,
@@ -679,7 +681,7 @@ def main():
         ),
     )
 
-    # --- Execute ---
+    # --- Execute --- 
     if args.batch:
         input_path = Path(args.input)
         if not input_path.is_dir():
