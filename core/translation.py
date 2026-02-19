@@ -17,6 +17,23 @@ TRANSLATION_PATTERN = re.compile(
     r'^\s*(\d+)\s*:\s*"?\s*(.*?)\s*"?\s*(?=\s*\n\s*\d+\s*:|\s*$)', re.MULTILINE | re.DOTALL
 )
 
+def _format_special_instructions(config: TranslationConfig) -> str:
+    """Format user's special instructions section for prompts.
+
+    Args:
+        config: TranslationConfig with special_instructions
+
+    Returns:
+        Formatted special instructions string (empty if none)
+    """
+    if config.special_instructions and config.special_instructions.strip():
+        return f"""
+
+## SPECIAL INSTRUCTIONS
+{config.special_instructions.strip()}
+"""
+    return ""
+
 def _contains_input_language(texts, input_language):
     if isinstance(texts, dict):
         candidate_texts = texts.values()
@@ -535,6 +552,7 @@ def call_translation_api_batch(
         attempt += 1
         try:
             if translation_mode == "two-step":
+                special_instructions_section = _format_special_instructions(config)
                 # ---------- STEP 1: OCR ----------
                 if bubble_ids:
                     ocr_prompt = f"""You will receive multiple bubble images.
@@ -580,6 +598,8 @@ Never omit an id."""
                     items_block = [{"id": bid, "text": ocr_map.get(bid, "")} for bid in bubble_ids]
                     items_json = json.dumps(items_block, ensure_ascii=False)
 
+                    special_instructions_section = _format_special_instructions(config)
+
                     translation_prompt = f"""Translate the following extracted bubble texts from {input_language} to {output_language}.
 IMPORTANT:
 - Consider ALL lines together as one continuous dialogue.
@@ -587,7 +607,7 @@ IMPORTANT:
 - If a line logically continues the previous one, translate them consistently so that meaning, tone and sentence flow are preserved.
 - Do NOT merge lines: keep one output per input id, but make each translation sound natural in context of neighboring lines.
 
-DO NOT translate Japanese names with suffixes "-san" or "-sama" into Mr./Ms, except words like "大家さん" or "組長さん" etc.
+{special_instructions_section}
 Return a STRICT JSON array mirroring the input, each item: {{"id":"<id>","text":"<translation or [OCR FAILED]>"}}.
 Return ONLY a JSON array.
 The response MUST start with '[' and end with ']'.
