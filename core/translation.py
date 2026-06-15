@@ -559,6 +559,7 @@ def call_translation_api_batch(
 Each bubble image is immediately preceded by a line "BUBBLE_ID=<id>".
 For EACH bubble image, extract ONLY the original {input_language} text
 visible inside that bubble.
+DO NOT extract small furigana text for Japanese language and just ignore it.
 Return a STRICT JSON array. Each item: {{"id":"<id>","text":"<extracted>"}}.
 Return ONLY valid JSON.
 Do not add explanations.
