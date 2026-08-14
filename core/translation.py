@@ -328,22 +328,41 @@ def _call_llm_with_retry(
                         )
                         time.sleep(RETRY_DELAY)
                         continue
+                    elif (
+                        "429" in msg
+                        or "resource_exhausted" in msg
+                        or "quota" in msg
+                        or "rate limit" in msg
+                        or "rate limiting" in msg
+                    ):
+                        log_message(
+                            f"Gemini key {idx + 1} got 429/quota/rate-limit. Switching to next key...",
+                            verbose=True,
+                        )
+
+                        gemini_key_manager.mark_exhausted(idx, reason_503=False)
+                        current_key_index = None
+                        break
+
+                    elif "403" in msg:
+                        log_message(
+                            f"Gemini key {idx + 1} got 403/forbidden. Switching to next key...",
+                            verbose=True,
+                        )
+
+                        gemini_key_manager.mark_exhausted(idx, reason_503=False)
+                        current_key_index = None
+                        break
+
                     elif "500" in msg or "internal" in msg:
                         log_message(
-                            f"Gemini key {idx + 1} got 500/internal error (attempt {attempt}/{MAX_RETRIES}). Retrying in {RETRY_DELAY}s...",
+                            f"Gemini key {idx + 1} got 500/internal error "
+                            f"(attempt {attempt}/{MAX_RETRIES}). "
+                            f"Retrying in {RETRY_DELAY}s...",
                             verbose=True,
                         )
                         time.sleep(RETRY_DELAY)
                         continue
-                    elif "quota" in msg or "403" in msg:
-                        log_message(
-                            f"Gemini key {idx + 1} exhausted/forbidden. Switching to next key...",
-                            verbose=True,
-                        )
-                        # помечаем как исчерпанный, но это не 503-стрик
-                        gemini_key_manager.mark_exhausted(idx, reason_503=False)
-                        current_key_index = None  # сбросить текущий ключ → взять новый
-                        break  # выйти из retry цикла → переключиться на новый ключ
                     else:
                         raise
 
